@@ -411,11 +411,15 @@ void IPCThreadState::flushCommands()
 {
     if (mProcess->mDriverFD <= 0)
         return;
+
+ALOGE("%s: >>>>>>>>>>>>>>>>>>>> going to talk (%p) <<<<<<<<<<<<<", __func__, this);
+
     talkWithDriver(false);
     // The flush could have caused post-write refcount decrements to have
     // been executed, which in turn could result in BC_RELEASE/BC_DECREFS
     // being queued in mOut. So flush again, if we need to.
     if (mOut.dataSize() > 0) {
+ALOGE("%s: >>>>>>>>>>>>>>>>>>>> going to talk (%p) <<<<<<<<<<<<<", __func__, this);
         talkWithDriver(false);
     }
     if (mOut.dataSize() > 0) {
@@ -439,6 +443,7 @@ status_t IPCThreadState::getAndExecuteCommand()
 {
     status_t result;
     int32_t cmd;
+ALOGE("%s: >>>>>>>>>>>>>>>>>>>> going to talk (%p) <<<<<<<<<<<<<", __func__, this);
 
     result = talkWithDriver();
     if (result >= NO_ERROR) {
@@ -578,6 +583,8 @@ void IPCThreadState::joinThreadPool(bool isMain)
 
     mOut.writeInt32(BC_EXIT_LOOPER);
     mIsLooper = false;
+ALOGE("%s: >>>>>>>>>>>>>>>>>>>> going to talk (%p) <<<<<<<<<<<<<", __func__, this);
+
     talkWithDriver(false);
 }
 
@@ -806,6 +813,8 @@ status_t IPCThreadState::waitForResponse(Parcel *reply, status_t *acquireResult)
     int32_t err;
 
     while (1) {
+ALOGE("%s: >>>>>>>>>>>>>>>>>>>> going to talk (%p) <<<<<<<<<<<<<", __func__, this);
+
         if ((err=talkWithDriver()) < NO_ERROR) break;
         err = mIn.errorCheck();
         if (err < NO_ERROR) break;
@@ -849,6 +858,7 @@ status_t IPCThreadState::waitForResponse(Parcel *reply, status_t *acquireResult)
 
                 if (reply) {
                     if ((tr.flags & TF_STATUS_CODE) == 0) {
+ALOGE("%s: BR_REPLY:",__func__);
                         reply->ipcSetDataReference(
                             reinterpret_cast<const uint8_t*>(tr.data.ptr.buffer),
                             tr.data_size,
@@ -943,10 +953,14 @@ status_t IPCThreadState::talkWithDriver(bool doReceive)
             alog << "About to read/write, write size = " << mOut.dataSize() << endl;
         }
 #if defined(__ANDROID__)
+ALOGE("%s: >>>>>>>>>>>>>>>>>>>> BEFORE (%p) mOut:%p mOutData:%p mIn:%p mInData:%p read_size:%llu read_consumed:%llu write_size:%llu write_consumed:%llu <<<<<<<<<<<<<",
+__func__, this, &mOut, mOut.data(), &mIn, mIn.data(),bwr.read_size, bwr.read_consumed, bwr.write_size, bwr.write_consumed);
         if (ioctl(mProcess->mDriverFD, BINDER_WRITE_READ, &bwr) >= 0)
             err = NO_ERROR;
         else
             err = -errno;
+ALOGE("%s: >>>>>>>>>>>>>>>>>>>> AFTER (%p) mOut:%p mOutData:%p mIn:%p mInData:%p read_size:%llu read_consumed:%llu write_size:%llu write_consumed:%llu err:%d<<<<<<<<<<<<<",
+__func__, this, &mOut, mOut.data(), &mIn, mIn.data(), bwr.read_size, bwr.read_consumed, bwr.write_size, bwr.write_consumed, err);
 #else
         err = INVALID_OPERATION;
 #endif
@@ -966,9 +980,10 @@ status_t IPCThreadState::talkWithDriver(bool doReceive)
 
     if (err >= NO_ERROR) {
         if (bwr.write_consumed > 0) {
-            if (bwr.write_consumed < mOut.dataSize())
+            if (bwr.write_consumed < mOut.dataSize()) {
+ALOGE("%s: >>>>>>>>>>>>>>>>>>>>> CRASHING!!!!!!!<<<<<<<<<<<<<<<<", __func__);
                 mOut.remove(0, bwr.write_consumed);
-            else {
+}            else {
                 mOut.setDataSize(0);
                 processPostWriteDerefs();
             }
@@ -1147,6 +1162,8 @@ status_t IPCThreadState::executeCommand(int32_t cmd)
             mIPCThreadStateBase->pushCurrentState(
                 IPCThreadStateBase::CallState::HWBINDER);
             Parcel buffer;
+ALOGE("%s: BR_TRANSACTION:",__func__);
+
             buffer.ipcSetDataReference(
                 reinterpret_cast<const uint8_t*>(tr.data.ptr.buffer),
                 tr.data_size,

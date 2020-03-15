@@ -1846,9 +1846,9 @@ void Parcel::ipcSetDataReference(const uint8_t* data, size_t dataSize,
     mError = NO_ERROR;
     mData = const_cast<uint8_t*>(data);
     mDataSize = mDataCapacity = dataSize;
-    //ALOGI("setDataReference Setting data size of %p to %lu (pid=%d)", this, mDataSize, getpid());
+    ALOGE(">>>>>>>>>>>>>>>>>>>>>>>> setDataReference Setting data size of %p to %zu (pid=%d) <<<<<<<<<<<<<<<<<<", this, mDataSize, getpid());
     mDataPos = 0;
-    ALOGV("setDataReference Setting data pos of %p to %zu", this, mDataPos);
+    ALOGE(">>>>>>>>>>>>>>>>>>>>>>>>> setDataReference Setting data pos of %p to %zu <<<<<<<<<<<<<<<<<<<<<<<", this, mDataPos);
     mObjects = const_cast<binder_size_t*>(objects);
     mObjectsSize = mObjectsCapacity = objectsCount;
     mNextObjectHint = 0;
