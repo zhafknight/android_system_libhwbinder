@@ -139,17 +139,20 @@ public:
             ~IPCThreadState();
 
             status_t            sendReply(const Parcel& reply, uint32_t flags);
-            status_t            waitForResponse(Parcel *reply,
+            status_t            waitForResponse(Parcel *in,
+                                                Parcel *out,
+                                                Parcel *reply,
                                                 status_t *acquireResult=nullptr);
-            status_t            talkWithDriver(bool doReceive=true);
-            status_t            writeTransactionData(int32_t cmd,
+            status_t            talkWithDriver(Parcel *in, Parcel *out, bool doReceive=true);
+            status_t            writeTransactionData(Parcel *out,
+                                                     int32_t cmd,
                                                      uint32_t binderFlags,
                                                      int32_t handle,
                                                      uint32_t code,
                                                      const Parcel& data,
                                                      status_t* statusBuffer);
             status_t            getAndExecuteCommand();
-            status_t            executeCommand(int32_t command);
+            status_t            executeCommand(Parcel *in, Parcel *out, int32_t command);
             void                processPendingDerefs();
             void                processPostWriteDerefs();
 
@@ -168,6 +171,9 @@ public:
             Vector<RefBase::weakref_type*> mPostWriteWeakDerefs;
             Parcel              mIn;
             Parcel              mOut;
+            Parcel              mIn1;
+            Parcel              mOut1;
+            int32_t             mInTalkWithDriver;
             status_t            mLastError;
             pid_t               mCallingPid;
             const char*         mCallingSid;
