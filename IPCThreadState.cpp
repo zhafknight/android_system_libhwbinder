@@ -45,7 +45,6 @@
 
 #if LOG_NDEBUG
 
-#define IF_LOG_NESTEDCOMMANDS() if (false)
 #define IF_LOG_TRANSACTIONS() if (false)
 #define IF_LOG_COMMANDS() if (false)
 #define LOG_REMOTEREFS(...)
@@ -55,7 +54,6 @@
 
 #else
 
-#define IF_LOG_NESTEDCOMMANDS() IF_ALOG(LOG_VERBOSE, "nestedcommands")
 #define IF_LOG_TRANSACTIONS() IF_ALOG(LOG_VERBOSE, "transact")
 #define IF_LOG_COMMANDS() IF_ALOG(LOG_VERBOSE, "ipc")
 #define LOG_REMOTEREFS(...) ALOG(LOG_DEBUG, "remoterefs", __VA_ARGS__)
@@ -413,31 +411,14 @@ void IPCThreadState::flushCommands()
 {
     if (mProcess->mDriverFD <= 0)
         return;
-
-    Parcel localIn;
-    Parcel localOut;
-
-    Parcel *in = &mIn;
-    Parcel *out = &mOut;
-
-    if (mInTalkWithDriver > 0) {
-        IF_LOG_NESTEDCOMMANDS() {
-            ALOGD("%s: Already talking with driver! mInTalkwithDriver:%d", __func__, mInTalkWithDriver);
-        }
-        localIn.setDataCapacity(256);
-        localOut.setDataCapacity(256);
-        in =  &localIn;
-        out = &localOut;
-    }
-
-    talkWithDriver(in, out, false);
+    talkWithDriver(false);
     // The flush could have caused post-write refcount decrements to have
     // been executed, which in turn could result in BC_RELEASE/BC_DECREFS
     // being queued in mOut. So flush again, if we need to.
-    if (out->dataSize() > 0) {
-        talkWithDriver(in, out, false);
+    if (mOut.dataSize() > 0) {
+        talkWithDriver(false);
     }
-    if (out->dataSize() > 0) {
+    if (mOut.dataSize() > 0) {
         ALOGW("mOut.dataSize() > 0 after flushCommands()");
     }
 }
@@ -459,27 +440,11 @@ status_t IPCThreadState::getAndExecuteCommand()
     status_t result;
     int32_t cmd;
 
-    Parcel localIn;
-    Parcel localOut;
-
-    Parcel *in = &mIn;
-    Parcel *out = &mOut;
-
-    if (mInTalkWithDriver > 0) {
-        IF_LOG_NESTEDCOMMANDS() {
-            ALOGD("%s: Already talking with driver! mInTalkwithDriver:%d", __func__, mInTalkWithDriver);
-        }
-        localIn.setDataCapacity(256);
-        localOut.setDataCapacity(256);
-        in =  &localIn;
-        out = &localOut;
-    }
-
-    result = talkWithDriver(in, out);
+    result = talkWithDriver();
     if (result >= NO_ERROR) {
-        size_t IN = in->dataAvail();
+        size_t IN = mIn.dataAvail();
         if (IN < sizeof(int32_t)) return result;
-        cmd = in->readInt32();
+        cmd = mIn.readInt32();
         IF_LOG_COMMANDS() {
             alog << "Processing top-level Command: "
                  << getReturnString(cmd) << endl;
@@ -493,7 +458,7 @@ status_t IPCThreadState::getAndExecuteCommand()
         }
         pthread_mutex_unlock(&mProcess->mThreadCountLock);
 
-        result = executeCommand(in, out, cmd);
+        result = executeCommand(cmd);
 
         pthread_mutex_lock(&mProcess->mThreadCountLock);
         mProcess->mExecutingThreadsCount--;
@@ -613,7 +578,7 @@ void IPCThreadState::joinThreadPool(bool isMain)
 
     mOut.writeInt32(BC_EXIT_LOOPER);
     mIsLooper = false;
-    talkWithDriver(&mIn, &mOut, false);
+    talkWithDriver(false);
 }
 
 int IPCThreadState::setupPolling(int* fd)
@@ -660,22 +625,6 @@ status_t IPCThreadState::transact(int32_t handle,
                                   uint32_t code, const Parcel& data,
                                   Parcel* reply, uint32_t flags)
 {
-    Parcel localIn;
-    Parcel localOut;
-
-    Parcel *in = &mIn;
-    Parcel *out = &mOut;
-
-    if (mInTalkWithDriver > 0) {
-        IF_LOG_NESTEDCOMMANDS() {
-            ALOGD("%s: Already talking with driver! mInTalkwithDriver:%d", __func__, mInTalkWithDriver);
-        }
-        localIn.setDataCapacity(256);
-        localOut.setDataCapacity(256);
-        in =  &localIn;
-        out = &localOut;
-    }
-
     status_t err;
 
     flags |= TF_ACCEPT_FDS;
@@ -687,9 +636,8 @@ status_t IPCThreadState::transact(int32_t handle,
     }
 
     LOG_ONEWAY(">>>> SEND from pid %d uid %d %s", getpid(), getuid(),
-         (flags & TF_ONE_WAY) == 0 ? "READ REPLY" : "ONE WAY");
-
-    err = writeTransactionData(out, BC_TRANSACTION_SG, flags, handle, code, data, nullptr);
+        (flags & TF_ONE_WAY) == 0 ? "READ REPLY" : "ONE WAY");
+    err = writeTransactionData(BC_TRANSACTION_SG, flags, handle, code, data, nullptr);
 
     if (err != NO_ERROR) {
         if (reply) reply->setError(err);
@@ -715,10 +663,10 @@ status_t IPCThreadState::transact(int32_t handle,
         }
         #endif
         if (reply) {
-            err = waitForResponse(in, out, reply);
+            err = waitForResponse(reply);
         } else {
             Parcel fakeReply;
-            err = waitForResponse(in, out, &fakeReply);
+            err = waitForResponse(&fakeReply);
         }
         #if 0
         if (code == 4) { // relayout
@@ -735,7 +683,7 @@ status_t IPCThreadState::transact(int32_t handle,
             else alog << "(none requested)" << endl;
         }
     } else {
-        err = waitForResponse(in, out, nullptr, nullptr);
+        err = waitForResponse(nullptr, nullptr);
     }
 
     return err;
@@ -744,16 +692,8 @@ status_t IPCThreadState::transact(int32_t handle,
 void IPCThreadState::incStrongHandle(int32_t handle, BpHwBinder *proxy)
 {
     LOG_REMOTEREFS("IPCThreadState::incStrongHandle(%d)\n", handle);
-    if (mInTalkWithDriver > 0) {
-        IF_LOG_NESTEDCOMMANDS() {
-            ALOGD("%s: Already talking with driver! mInTalkwithDriver:%d", __func__, mInTalkWithDriver);
-        }
-        mOut1.writeInt32(BC_ACQUIRE);
-        mOut1.writeInt32(handle);
-    } else {
-        mOut.writeInt32(BC_ACQUIRE);
-        mOut.writeInt32(handle);
-    }
+    mOut.writeInt32(BC_ACQUIRE);
+    mOut.writeInt32(handle);
     // Create a temp reference until the driver has handled this command.
     proxy->incStrong(mProcess.get());
     mPostWriteStrongDerefs.push(proxy);
@@ -762,31 +702,15 @@ void IPCThreadState::incStrongHandle(int32_t handle, BpHwBinder *proxy)
 void IPCThreadState::decStrongHandle(int32_t handle)
 {
     LOG_REMOTEREFS("IPCThreadState::decStrongHandle(%d)\n", handle);
-    if (mInTalkWithDriver > 0) {
-        IF_LOG_NESTEDCOMMANDS() {
-            ALOGD("%s: Already talking with driver! mInTalkwithDriver:%d", __func__, mInTalkWithDriver);
-        }
-        mOut1.writeInt32(BC_RELEASE);
-        mOut1.writeInt32(handle);
-    } else {
-        mOut.writeInt32(BC_RELEASE);
-        mOut.writeInt32(handle);
-    }
+    mOut.writeInt32(BC_RELEASE);
+    mOut.writeInt32(handle);
 }
 
 void IPCThreadState::incWeakHandle(int32_t handle, BpHwBinder *proxy)
 {
     LOG_REMOTEREFS("IPCThreadState::incWeakHandle(%d)\n", handle);
-    if (mInTalkWithDriver > 0) {
-        IF_LOG_NESTEDCOMMANDS() {
-            ALOGD("%s: Already talking with driver! mInTalkwithDriver:%d", __func__, mInTalkWithDriver);
-        }
-        mOut1.writeInt32(BC_INCREFS);
-        mOut1.writeInt32(handle);
-    } else {
-        mOut.writeInt32(BC_INCREFS);
-        mOut.writeInt32(handle);
-    }
+    mOut.writeInt32(BC_INCREFS);
+    mOut.writeInt32(handle);
     // Create a temp reference until the driver has handled this command.
     proxy->getWeakRefs()->incWeak(mProcess.get());
     mPostWriteWeakDerefs.push(proxy->getWeakRefs());
@@ -795,37 +719,20 @@ void IPCThreadState::incWeakHandle(int32_t handle, BpHwBinder *proxy)
 void IPCThreadState::decWeakHandle(int32_t handle)
 {
     LOG_REMOTEREFS("IPCThreadState::decWeakHandle(%d)\n", handle);
-    if (mInTalkWithDriver > 0) {
-        IF_LOG_NESTEDCOMMANDS() {
-            ALOGD("%s: Already talking with driver! mInTalkwithDriver:%d", __func__, mInTalkWithDriver);
-        }
-        mOut1.writeInt32(BC_DECREFS);
-        mOut1.writeInt32(handle);
-    } else {
-        mOut.writeInt32(BC_DECREFS);
-        mOut.writeInt32(handle);
-    }
+    mOut.writeInt32(BC_DECREFS);
+    mOut.writeInt32(handle);
 }
 
 status_t IPCThreadState::attemptIncStrongHandle(int32_t handle)
 {
 #if HAS_BC_ATTEMPT_ACQUIRE
     LOG_REMOTEREFS("IPCThreadState::attemptIncStrongHandle(%d)\n", handle);
-    if (mInTalkWithDriver > 0) {
-        IF_LOG_NESTEDCOMMANDS() {
-            ALOGD("%s: Already talking with driver! mInTalkwithDriver:%d", __func__, mInTalkWithDriver);
-        }
-        mOut1.writeInt32(BC_ATTEMPT_ACQUIRE);
-        mOut1.writeInt32(0); // xxx was thread priority
-        mOut1.writeInt32(handle);
-    } else {
-        mOut.writeInt32(BC_ATTEMPT_ACQUIRE);
-        mOut.writeInt32(0); // xxx was thread priority
-        mOut.writeInt32(handle);
-    }
+    mOut.writeInt32(BC_ATTEMPT_ACQUIRE);
+    mOut.writeInt32(0); // xxx was thread priority
+    mOut.writeInt32(handle);
     status_t result = UNKNOWN_ERROR;
 
-    waitForResponse(&mIn, &mOut, nullptr, &result);
+    waitForResponse(nullptr, &result);
 
 #if LOG_REFCOUNTS
     printf("IPCThreadState::attemptIncStrongHandle(%ld) = %s\n",
@@ -850,35 +757,17 @@ void IPCThreadState::expungeHandle(int32_t handle, IBinder* binder)
 
 status_t IPCThreadState::requestDeathNotification(int32_t handle, BpHwBinder* proxy)
 {
-    if (mInTalkWithDriver > 0) {
-        IF_LOG_NESTEDCOMMANDS() {
-            ALOGD("%s: Already talking with driver! mInTalkwithDriver:%d", __func__, mInTalkWithDriver);
-        }
-        mOut1.writeInt32(BC_REQUEST_DEATH_NOTIFICATION);
-        mOut1.writeInt32((int32_t)handle);
-        mOut1.writePointer((uintptr_t)proxy);
-    } else {
-        mOut.writeInt32(BC_REQUEST_DEATH_NOTIFICATION);
-        mOut.writeInt32((int32_t)handle);
-        mOut.writePointer((uintptr_t)proxy);
-    }
+    mOut.writeInt32(BC_REQUEST_DEATH_NOTIFICATION);
+    mOut.writeInt32((int32_t)handle);
+    mOut.writePointer((uintptr_t)proxy);
     return NO_ERROR;
 }
 
 status_t IPCThreadState::clearDeathNotification(int32_t handle, BpHwBinder* proxy)
 {
-    if (mInTalkWithDriver > 0) {
-        IF_LOG_NESTEDCOMMANDS() {
-            ALOGD("%s: Already talking with driver! mInTalkwithDriver:%d", __func__, mInTalkWithDriver);
-        }
-        mOut1.writeInt32(BC_CLEAR_DEATH_NOTIFICATION);
-        mOut1.writeInt32((int32_t)handle);
-        mOut1.writePointer((uintptr_t)proxy);
-    } else {
-        mOut.writeInt32(BC_CLEAR_DEATH_NOTIFICATION);
-        mOut.writeInt32((int32_t)handle);
-        mOut.writePointer((uintptr_t)proxy);
-    }
+    mOut.writeInt32(BC_CLEAR_DEATH_NOTIFICATION);
+    mOut.writeInt32((int32_t)handle);
+    mOut.writePointer((uintptr_t)proxy);
     return NO_ERROR;
 }
 
@@ -893,7 +782,7 @@ IPCThreadState::IPCThreadState()
     clearCaller();
     mIn.setDataCapacity(256);
     mOut.setDataCapacity(256);
-    mInTalkWithDriver = 0;
+
     mIPCThreadStateBase = IPCThreadStateBase::self();
 }
 
@@ -905,24 +794,24 @@ status_t IPCThreadState::sendReply(const Parcel& reply, uint32_t flags)
 {
     status_t err;
     status_t statusBuffer;
-    err = writeTransactionData(&mOut, BC_REPLY_SG, flags, -1, 0, reply, &statusBuffer);
+    err = writeTransactionData(BC_REPLY_SG, flags, -1, 0, reply, &statusBuffer);
     if (err < NO_ERROR) return err;
 
-    return waitForResponse(&mIn, &mOut, nullptr, nullptr);
+    return waitForResponse(nullptr, nullptr);
 }
 
-status_t IPCThreadState::waitForResponse(Parcel *in, Parcel *out, Parcel *reply, status_t *acquireResult)
+status_t IPCThreadState::waitForResponse(Parcel *reply, status_t *acquireResult)
 {
     uint32_t cmd;
     int32_t err;
 
     while (1) {
-        if ((err=talkWithDriver(in, out)) < NO_ERROR) break;
-        err = in->errorCheck();
+        if ((err=talkWithDriver()) < NO_ERROR) break;
+        err = mIn.errorCheck();
         if (err < NO_ERROR) break;
-        if (in->dataAvail() == 0) continue;
+        if (mIn.dataAvail() == 0) continue;
 
-        cmd = (uint32_t)in->readInt32();
+        cmd = (uint32_t)mIn.readInt32();
 
         IF_LOG_COMMANDS() {
             alog << "Processing waitForResponse Command: "
@@ -945,7 +834,7 @@ status_t IPCThreadState::waitForResponse(Parcel *in, Parcel *out, Parcel *reply,
         case BR_ACQUIRE_RESULT:
             {
                 ALOG_ASSERT(acquireResult != nullptr, "Unexpected brACQUIRE_RESULT");
-                const int32_t result = in->readInt32();
+                const int32_t result = mIn.readInt32();
                 if (!acquireResult) continue;
                 *acquireResult = result ? NO_ERROR : INVALID_OPERATION;
             }
@@ -954,7 +843,7 @@ status_t IPCThreadState::waitForResponse(Parcel *in, Parcel *out, Parcel *reply,
         case BR_REPLY:
             {
                 binder_transaction_data tr;
-                err = in->read(&tr, sizeof(tr));
+                err = mIn.read(&tr, sizeof(tr));
                 ALOG_ASSERT(err == NO_ERROR, "Not enough command data for brREPLY");
                 if (err != NO_ERROR) goto finish;
 
@@ -986,7 +875,7 @@ status_t IPCThreadState::waitForResponse(Parcel *in, Parcel *out, Parcel *reply,
             goto finish;
 
         default:
-            err = executeCommand(in, out, cmd);
+            err = executeCommand(cmd);
             if (err != NO_ERROR) goto finish;
             break;
         }
@@ -1002,47 +891,29 @@ finish:
     return err;
 }
 
-status_t IPCThreadState::talkWithDriver(Parcel *in, Parcel *out, bool doReceive)
+status_t IPCThreadState::talkWithDriver(bool doReceive)
 {
     if (mProcess->mDriverFD <= 0) {
         return -EBADF;
     }
 
-    if (mOut1.dataSize() > 0) {
-        IF_LOG_NESTEDCOMMANDS() {
-            ALOGD("%s: Merging pending message from mOut1 (data:%p dataSize:%d) to out (data:%p dataSize:%d)",
-                __func__, mOut1.data(), mOut1.dataSize(), out->data(), out->dataSize());
-        }
-        out->writeUnpadded(mOut1.data(), mOut1.dataSize());
-        mOut1.setDataSize(0);
-    }
-    if (mInTalkWithDriver > 0) {
-        IF_LOG_NESTEDCOMMANDS() {
-            ALOGD("%s: Merging pending...... mOut1 (data:%p dataSize:%d) to out (data:%p dataSize:%d)",
-                __func__, mOut1.data(), mOut1.dataSize(), out->data(), out->dataSize());
-        }
-    }
-    mInTalkWithDriver++;
-    IF_LOG_NESTEDCOMMANDS() {
-        ALOGD("%s: Entering mInTalkWithDriver:%d in:%p out:%p", __func__, mInTalkWithDriver, in , out);
-    }
     binder_write_read bwr;
 
     // Is the read buffer empty?
-    const bool needRead = in->dataPosition() >= in->dataSize();
+    const bool needRead = mIn.dataPosition() >= mIn.dataSize();
 
     // We don't want to write anything if we are still reading
     // from data left in the input buffer and the caller
     // has requested to read the next data.
-    const size_t outAvail = (!doReceive || needRead) ? out->dataSize() : 0;
+    const size_t outAvail = (!doReceive || needRead) ? mOut.dataSize() : 0;
 
     bwr.write_size = outAvail;
-    bwr.write_buffer = (uintptr_t)out->data();
+    bwr.write_buffer = (uintptr_t)mOut.data();
 
     // This is what we'll read.
     if (doReceive && needRead) {
-        bwr.read_size = in->dataCapacity();
-        bwr.read_buffer = (uintptr_t)in->data();
+        bwr.read_size = mIn.dataCapacity();
+        bwr.read_buffer = (uintptr_t)mIn.data();
     } else {
         bwr.read_size = 0;
         bwr.read_buffer = 0;
@@ -1062,24 +933,14 @@ status_t IPCThreadState::talkWithDriver(Parcel *in, Parcel *out, bool doReceive)
     }
 
     // Return immediately if there is nothing to do.
-    if ((bwr.write_size == 0) && (bwr.read_size == 0)) {
-        IF_LOG_NESTEDCOMMANDS() {
-            ALOGD("%s: Exit mInTalkWithDriver:%d in:%p out:%p err:NO_ERROR", __func__, mInTalkWithDriver, in , out);
-        }
-        mInTalkWithDriver--;
-        return NO_ERROR;
-    }
+    if ((bwr.write_size == 0) && (bwr.read_size == 0)) return NO_ERROR;
 
     bwr.write_consumed = 0;
     bwr.read_consumed = 0;
     status_t err;
     do {
         IF_LOG_COMMANDS() {
-            alog << "About to read/write, write size = " << out->dataSize() << endl;
-        }
-        IF_LOG_NESTEDCOMMANDS() {
-            ALOGD("%s: Going to read/write (%p), write size = %d in:%p out:%p write_consumed:%llu",
-                __func__, out->data(), out->dataSize(), in, out, bwr.write_consumed);
+            alog << "About to read/write, write size = " << mOut.dataSize() << endl;
         }
 #if defined(__ANDROID__)
         if (ioctl(mProcess->mDriverFD, BINDER_WRITE_READ, &bwr) >= 0)
@@ -1092,59 +953,46 @@ status_t IPCThreadState::talkWithDriver(Parcel *in, Parcel *out, bool doReceive)
         if (mProcess->mDriverFD <= 0) {
             err = -EBADF;
         }
-        IF_LOG_NESTEDCOMMANDS() {
-            ALOGD("%s: Done read/write (%p), write size = %d in:%p out:%p err:%d write_consumed:%llu",
-                __func__, out->data(), out->dataSize(), in, out, err, bwr.write_consumed);
-	}
         IF_LOG_COMMANDS() {
-            alog << "Finished read/write, write size = " << out->dataSize() << endl;
+            alog << "Finished read/write, write size = " << mOut.dataSize() << endl;
         }
     } while (err == -EINTR);
 
     IF_LOG_COMMANDS() {
         alog << "Our err: " << (void*)(intptr_t)err << ", write consumed: "
-            << bwr.write_consumed << " (of " << out->dataSize()
+            << bwr.write_consumed << " (of " << mOut.dataSize()
                         << "), read consumed: " << bwr.read_consumed << endl;
     }
 
     if (err >= NO_ERROR) {
         if (bwr.write_consumed > 0) {
-            if (bwr.write_consumed < out->dataSize())
-                out->remove(0, bwr.write_consumed);
+            if (bwr.write_consumed < mOut.dataSize())
+                mOut.remove(0, bwr.write_consumed);
             else {
-                out->setDataSize(0);
+                mOut.setDataSize(0);
                 processPostWriteDerefs();
             }
         }
         if (bwr.read_consumed > 0) {
-            in->setDataSize(bwr.read_consumed);
-            in->setDataPosition(0);
+            mIn.setDataSize(bwr.read_consumed);
+            mIn.setDataPosition(0);
         }
         IF_LOG_COMMANDS() {
-            alog << "Remaining data size: " << out->dataSize() << endl;
+            alog << "Remaining data size: " << mOut.dataSize() << endl;
             alog << "Received commands from driver: " << indent;
-            const void* cmds = in->data();
-            const void* end = in->data() + in->dataSize();
-            alog << HexDump(cmds, in->dataSize()) << endl;
+            const void* cmds = mIn.data();
+            const void* end = mIn.data() + mIn.dataSize();
+            alog << HexDump(cmds, mIn.dataSize()) << endl;
             while (cmds < end) cmds = printReturnCommand(alog, cmds);
             alog << dedent;
         }
-        IF_LOG_NESTEDCOMMANDS() {
-            ALOGD("%s: Exit mInTalkWithDriver:%d in:%p out:%p err:NO_ERROR", __func__, mInTalkWithDriver, in, out);
-        }
-        mInTalkWithDriver--;
-
         return NO_ERROR;
     }
-    IF_LOG_NESTEDCOMMANDS() {
-        ALOGD("%s: Exit mInTalkWithDriver:%d in:%p out:%p err:%d", __func__, mInTalkWithDriver, in, out, err);
-    }
-    mInTalkWithDriver--;
 
     return err;
 }
 
-status_t IPCThreadState::writeTransactionData(Parcel *out, int32_t cmd, uint32_t binderFlags,
+status_t IPCThreadState::writeTransactionData(int32_t cmd, uint32_t binderFlags,
     int32_t handle, uint32_t code, const Parcel& data, status_t* statusBuffer)
 {
     binder_transaction_data_sg tr_sg;
@@ -1176,8 +1024,8 @@ status_t IPCThreadState::writeTransactionData(Parcel *out, int32_t cmd, uint32_t
         return (mLastError = err);
     }
 
-    out->writeInt32(cmd);
-    out->write(&tr_sg, sizeof(tr_sg));
+    mOut.writeInt32(cmd);
+    mOut.write(&tr_sg, sizeof(tr_sg));
 
     return NO_ERROR;
 }
@@ -1200,22 +1048,22 @@ void IPCThreadState::addPostCommandTask(const std::function<void(void)>& task) {
     mPostCommandTasks.push_back(task);
 }
 
-status_t IPCThreadState::executeCommand(Parcel *in, Parcel *out, int32_t cmd)
+status_t IPCThreadState::executeCommand(int32_t cmd)
 {
     BHwBinder* obj;
     RefBase::weakref_type* refs;
     status_t result = NO_ERROR;
     switch ((uint32_t)cmd) {
     case BR_ERROR:
-        result = in->readInt32();
+        result = mIn.readInt32();
         break;
 
     case BR_OK:
         break;
 
     case BR_ACQUIRE:
-        refs = (RefBase::weakref_type*)in->readPointer();
-        obj = (BHwBinder*)in->readPointer();
+        refs = (RefBase::weakref_type*)mIn.readPointer();
+        obj = (BHwBinder*)mIn.readPointer();
         ALOG_ASSERT(refs->refBase() == obj,
                    "BR_ACQUIRE: object %p does not match cookie %p (expected %p)",
                    refs, obj, refs->refBase());
@@ -1224,14 +1072,14 @@ status_t IPCThreadState::executeCommand(Parcel *in, Parcel *out, int32_t cmd)
             LOG_REMOTEREFS("BR_ACQUIRE from driver on %p", obj);
             obj->printRefs();
         }
-        out->writeInt32(BC_ACQUIRE_DONE);
-        out->writePointer((uintptr_t)refs);
-        out->writePointer((uintptr_t)obj);
+        mOut.writeInt32(BC_ACQUIRE_DONE);
+        mOut.writePointer((uintptr_t)refs);
+        mOut.writePointer((uintptr_t)obj);
         break;
 
     case BR_RELEASE:
-        refs = (RefBase::weakref_type*)in->readPointer();
-        obj = (BHwBinder*)in->readPointer();
+        refs = (RefBase::weakref_type*)mIn.readPointer();
+        obj = (BHwBinder*)mIn.readPointer();
         ALOG_ASSERT(refs->refBase() == obj,
                    "BR_RELEASE: object %p does not match cookie %p (expected %p)",
                    refs, obj, refs->refBase());
@@ -1243,17 +1091,17 @@ status_t IPCThreadState::executeCommand(Parcel *in, Parcel *out, int32_t cmd)
         break;
 
     case BR_INCREFS:
-        refs = (RefBase::weakref_type*)in->readPointer();
-        obj = (BHwBinder*)in->readPointer();
+        refs = (RefBase::weakref_type*)mIn.readPointer();
+        obj = (BHwBinder*)mIn.readPointer();
         refs->incWeak(mProcess.get());
-        out->writeInt32(BC_INCREFS_DONE);
-        out->writePointer((uintptr_t)refs);
-        out->writePointer((uintptr_t)obj);
+        mOut.writeInt32(BC_INCREFS_DONE);
+        mOut.writePointer((uintptr_t)refs);
+        mOut.writePointer((uintptr_t)obj);
         break;
 
     case BR_DECREFS:
-        refs = (RefBase::weakref_type*)in->readPointer();
-        obj = (BHwBinder*)in->readPointer();
+        refs = (RefBase::weakref_type*)mIn.readPointer();
+        obj = (BHwBinder*)mIn.readPointer();
         // NOTE: This assertion is not valid, because the object may no
         // longer exist (thus the (BHwBinder*)cast above resulting in a different
         // memory address).
@@ -1264,8 +1112,8 @@ status_t IPCThreadState::executeCommand(Parcel *in, Parcel *out, int32_t cmd)
         break;
 
     case BR_ATTEMPT_ACQUIRE:
-        refs = (RefBase::weakref_type*)in->readPointer();
-        obj = (BHwBinder*)in->readPointer();
+        refs = (RefBase::weakref_type*)mIn.readPointer();
+        obj = (BHwBinder*)mIn.readPointer();
 
         {
             const bool success = refs->attemptIncStrong(mProcess.get());
@@ -1273,8 +1121,8 @@ status_t IPCThreadState::executeCommand(Parcel *in, Parcel *out, int32_t cmd)
                        "BR_ATTEMPT_ACQUIRE: object %p does not match cookie %p (expected %p)",
                        refs, obj, refs->refBase());
 
-            out->writeInt32(BC_ACQUIRE_RESULT);
-            out->writeInt32((int32_t)success);
+            mOut.writeInt32(BC_ACQUIRE_RESULT);
+            mOut.writeInt32((int32_t)success);
         }
         break;
 
@@ -1285,9 +1133,9 @@ status_t IPCThreadState::executeCommand(Parcel *in, Parcel *out, int32_t cmd)
             binder_transaction_data& tr = tr_secctx.transaction_data;
 
             if (cmd == BR_TRANSACTION_SEC_CTX) {
-                result = in->read(&tr_secctx, sizeof(tr_secctx));
+                result = mIn.read(&tr_secctx, sizeof(tr_secctx));
             } else {
-                result = in->read(&tr, sizeof(tr));
+                result = mIn.read(&tr, sizeof(tr));
                 tr_secctx.secctx = 0;
             }
 
@@ -1401,15 +1249,15 @@ status_t IPCThreadState::executeCommand(Parcel *in, Parcel *out, int32_t cmd)
 
     case BR_DEAD_BINDER:
         {
-            BpHwBinder *proxy = (BpHwBinder*)in->readPointer();
+            BpHwBinder *proxy = (BpHwBinder*)mIn.readPointer();
             proxy->sendObituary();
-            out->writeInt32(BC_DEAD_BINDER_DONE);
-            out->writePointer((uintptr_t)proxy);
+            mOut.writeInt32(BC_DEAD_BINDER_DONE);
+            mOut.writePointer((uintptr_t)proxy);
         } break;
 
     case BR_CLEAR_DEATH_NOTIFICATION_DONE:
         {
-            BpHwBinder *proxy = (BpHwBinder*)in->readPointer();
+            BpHwBinder *proxy = (BpHwBinder*)mIn.readPointer();
             proxy->getWeakRefs()->decWeak(proxy);
         } break;
 
@@ -1469,17 +1317,8 @@ void IPCThreadState::freeBuffer(Parcel* parcel, const uint8_t* data,
     ALOG_ASSERT(data != nullptr, "Called with NULL data");
     if (parcel != nullptr) parcel->closeFileDescriptors();
     IPCThreadState* state = self();
-
-    IF_LOG_NESTEDCOMMANDS() {
-        ALOGD("%s: ======== mInTalkWithDriver:%d", __func__, state->mInTalkWithDriver);
-    }
-    if (state->mInTalkWithDriver > 0) {
-        state->mOut1.writeInt32(BC_FREE_BUFFER);
-        state->mOut1.writePointer((uintptr_t)data);
-    } else {
-        state->mOut.writeInt32(BC_FREE_BUFFER);
-        state->mOut.writePointer((uintptr_t)data);
-    }
+    state->mOut.writeInt32(BC_FREE_BUFFER);
+    state->mOut.writePointer((uintptr_t)data);
 }
 
 }; // namespace hardware
