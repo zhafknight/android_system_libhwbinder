@@ -308,8 +308,9 @@ void ProcessState::spawnPooledThread(bool isMain)
 }
 
 status_t ProcessState::setThreadPoolConfiguration(size_t maxThreads, bool callerJoinsPool) {
-    LOG_ALWAYS_FATAL_IF(mThreadPoolStarted && maxThreads < mMaxThreads,
-           "Binder threadpool cannot be shrunk after starting");
+    if (mThreadPoolStarted && maxThreads < mMaxThreads) {
+        ALOGE("Binder threadpool cannot be shrunk after starting. maxThreads:%zu mMaxThreads:%zu", maxThreads, mMaxThreads);
+    }
 
     // if the caller joins the pool, then there will be one thread which is impossible.
     LOG_ALWAYS_FATAL_IF(maxThreads == 0 && callerJoinsPool,
